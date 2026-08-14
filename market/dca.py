@@ -118,35 +118,52 @@ def simulate_dca(
     weights on the same index/columns, rows sum to <= 1."""
     prices = prices.dropna(how="all")
     weights = weights.reindex(prices.index).ffill().fillna(0.0)[prices.columns]
+    index = prices.index
 
-    contribution_days = _period_starts(prices.index, "MS")
-    rebalance_days = _period_starts(prices.index, rebalance)
-    year_of = prices.index.year
+    contribution_days = _period_starts(index, "MS")
+    rebalance_days = _period_starts(index, rebalance)
+    year_starts = _period_starts(index, "YS")
 
     ledger = _Ledger() if tax else None
     holdings = pd.Series(0.0, index=prices.columns)
     cash = 0.0
-    values, contribs = [], []
 
-    for i, day in enumerate(prices.index):
-        px = prices.loc[day]
-        if ledger and i > 0 and year_of[i] != year_of[i - 1]:
+    # Event-driven: holdings and cash only change on these days; the value
+    # series between events is a vectorized dot product.
+    position = {day: i for i, day in enumerate(index)}
+    events = contribution_days | rebalance_days
+    if ledger:
+        events = events | year_starts | {index[-1]}
+    event_positions = sorted(position[d] for d in events)
+
+    price_matrix = np.nan_to_num(prices.to_numpy())  # NaN price -> worth 0, as before
+    values = np.zeros(len(index))
+    contribs = np.zeros(len(index))
+    filled = 0
+
+    for p in event_positions:
+        if p > filled:
+            values[filled:p] = price_matrix[filled:p] @ holdings.to_numpy() + cash
+            filled = p
+        day = index[p]
+        px = prices.iloc[p]
+        if ledger and p > 0 and day in year_starts:
             cash -= ledger.settle(tax)
         added = 0.0
         if day in contribution_days:
             added = monthly
             cash += monthly
+            contribs[p] = monthly
         if day in rebalance_days:
-            cash = _rebalance_to_target(holdings, weights.loc[day], px, cash, fees, ledger, day)
+            cash = _rebalance_to_target(holdings, weights.iloc[p], px, cash, fees, ledger, day)
         elif added and cash > 0:
-            cash = _buy_only(holdings, weights.loc[day], px, cash, fees, ledger, day)
-        if ledger and i == len(prices.index) - 1:
+            cash = _buy_only(holdings, weights.iloc[p], px, cash, fees, ledger, day)
+        if ledger and p == len(index) - 1:
             cash -= ledger.settle(tax)  # last (partial) year's gains
-        values.append(float((holdings * px).fillna(0.0).sum() + cash))
-        contribs.append(added)
+    values[filled:] = price_matrix[filled:] @ holdings.to_numpy() + cash
 
-    value = pd.Series(values, index=prices.index, name=name)
-    contributions = pd.Series(contribs, index=prices.index)
+    value = pd.Series(values, index=index, name=name)
+    contributions = pd.Series(contribs, index=index)
     unit = _unit_index(value, contributions)
     total = float(contributions.sum())
     final = float(value.iloc[-1])
