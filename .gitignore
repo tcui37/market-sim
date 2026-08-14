@@ -1,0 +1,9 @@
+# environments & caches (regenerable)
+.venv/
+.data_cache/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# OS noise
+.DS_Store
