@@ -1,5 +1,7 @@
 # Which Top-N, and Monthly vs Annual? — 41 Rolling 10-Year Windows
 
+> **⚠️ Update (2026-08-14):** the "annual wins in both account types" conclusion below is **partly overturned** by the follow-up [rebalance-anchor experiment](../2026-08-14-rebalance-anchor/REPORT.md). This experiment's annual strategies all rebalanced in January, which turned out to be a lucky anchor; pooled across all 12 anchor months, monthly ties or beats annual after tax and eliminates 4–8pp of calendar luck. See the follow-up for the revised recommendation (top-2/3, monthly).
+
 ## Investigative question
 
 For a **10-year, $600/month** plan: which **N** (top-N market cap, equal weight) should you hold, and should you rebalance **monthly or annually** — in a **Roth IRA** (no taxes) and in a **taxable account** (capital-gains taxes)? Judged not on one lucky start date, but across **every rolling 10-year window** the data supports.
