@@ -28,7 +28,7 @@ import pandas as pd
 from market import snapshot as snap
 from market.dca import TaxConfig
 from market.tax import FILINGS, STATES, TaxProfile
-from market.topn import CHECK_FREQ, MONTHS, buy_and_hold, simulate_top_n
+from market.topn import CHECK_FREQ, MONTHS, TopNResult, buy_and_hold, simulate_top_n
 
 HERE = Path(__file__).resolve().parent
 
@@ -48,6 +48,35 @@ def strategy_name(n: int, check: str, anchor: str) -> str:
     if check == "annual" and anchor != "JAN":
         return f"Top-{n} annual ({anchor})"
     return f"Top-{n} {check}"
+
+
+def average_anchors(runs: dict[str, TopNResult], name: str) -> TopNResult:
+    """Collapse one result per anchor month into their average.
+
+    Trades and holdings cannot be averaged, so they come from the January run.
+    """
+    base = runs["JAN"]
+    def stack(attr):
+        return pd.concat([getattr(r, attr) for r in runs.values()], axis=1)
+    value = stack("value").mean(axis=1)
+    net_value = stack("net_value").mean(axis=1)
+    taxes = pd.concat([r.taxes.reindex(base.value.index).fillna(0.0)
+                       for r in runs.values()], axis=1).mean(axis=1)
+    yearly = pd.concat([r.yearly for r in runs.values()]).groupby(level=0).mean()
+    return TopNResult(
+        name=name, value=value, net_value=net_value, taxes=taxes[taxes != 0.0],
+        trades=base.trades, yearly=yearly, invested=base.invested,
+        metrics=_average_metrics([r.metrics for r in runs.values()]),
+        holdings=base.holdings,
+    )
+
+
+def _average_metrics(metrics: list[dict]) -> dict:
+    averaged = {}
+    for key in metrics[0]:
+        values = [m[key] for m in metrics if m[key] is not None]
+        averaged[key] = sum(values) / len(values) if values else None
+    return averaged
 
 
 def run_grid(data: snap.Snapshot, args) -> tuple[pd.DataFrame, dict, dict]:
@@ -140,11 +169,17 @@ def benchmark_label(ticker: str) -> str:
 
 # ------------------------------------------------------------------ formatting
 
+def changes_text(value: float) -> str:
+    return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.1f}"
+
+
 def fmt(df: pd.DataFrame, percent: tuple[str, ...] = ()) -> pd.DataFrame:
     out = df.copy()
     for col in out.columns:
         if col in MONEY:
             out[col] = out[col].map(lambda v: "-" if pd.isna(v) else f"${v:,.0f}")
+        elif col == "changes":
+            out[col] = out[col].map(lambda v: "-" if pd.isna(v) else changes_text(v))
         elif col in PERCENT or col in percent:
             out[col] = out[col].map(lambda v: "-" if pd.isna(v) else f"{v:+.1%}")
     return out
@@ -227,9 +262,7 @@ SUMMARY_NAMES = {
 def _summary_frame(results: dict, benchmark, label: str, years: int) -> pd.DataFrame:
     rows = [_summary_row(years, 0, r) for r in results.values()]
     rows.append({**_summary_row(years, 0, benchmark), "strategy": f"{label} buy & hold"})
-    summary = pd.DataFrame(rows).set_index("strategy")[list(SUMMARY_NAMES)]
-    summary["changes"] = summary["changes"].astype(int)
-    return summary
+    return pd.DataFrame(rows).set_index("strategy")[list(SUMMARY_NAMES)]
 
 
 def _verdict(summary: pd.DataFrame, benchmark, label: str) -> list[str]:
@@ -257,8 +290,8 @@ def _verdict(summary: pd.DataFrame, benchmark, label: str) -> list[str]:
         f"The best monthly variant was **{top_monthly}** at "
         f"{monthly.loc[top_monthly, 'after_tax_cagr']:+.1%} after tax, "
         f"{abs(gap) * 100:.1f} points {'ahead of' if gap > 0 else 'behind'} {top_annual}, "
-        f"and it traded {monthly.loc[top_monthly, 'changes']} times to that strategy's "
-        f"{annual.loc[top_annual, 'changes']}."
+        f"and it traded {changes_text(monthly.loc[top_monthly, 'changes'])} times to that "
+        f"strategy's {changes_text(annual.loc[top_annual, 'changes'])}."
     )
     bullets.append(
         ("All " + str(count) if beat == count else f"{beat} of the {count}")
@@ -275,7 +308,38 @@ def _verdict(summary: pd.DataFrame, benchmark, label: str) -> list[str]:
     return bullets
 
 
-def results_section(results: dict, benchmark, args, years: int, label: str) -> list[str]:
+def anchor_section(per_anchor: dict) -> list[str]:
+    """How much the month of the annual check mattered, behind the averages."""
+    spread = pd.DataFrame({
+        name: {anchor: run.metrics["after_tax_cagr"] for anchor, run in runs.items()}
+        for name, runs in per_anchor.items()
+    })
+    rows = {}
+    for name in spread.columns:
+        column = spread[name]
+        rows[name] = {"Best month": f"{column.idxmax()} {column.max():+.1%}",
+                      "Worst month": f"{column.idxmin()} {column.min():+.1%}",
+                      "Spread": f"{(column.max() - column.min()) * 100:.1f} points",
+                      "Average": f"{column.mean():+.1%}"}
+    table = pd.DataFrame(rows).T
+
+    return [
+        "The month an annual check falls in changes the outcome. After-tax annual "
+        "return by that month:",
+        "",
+        md_table(table, "Strategy"),
+        "",
+        "<details><summary>All 12 configurations, after-tax annual return</summary>",
+        "",
+        md_table(as_percent(spread), "Check month"),
+        "",
+        "</details>",
+        "",
+    ]
+
+
+def results_section(results: dict, benchmark, args, years: int, label: str,
+                    per_anchor: dict) -> list[str]:
     """One window's headline: the bullets, then both orderings of the same table."""
     first = next(iter(results.values()))
     summary = _summary_frame(results, benchmark, label, years)
@@ -286,7 +350,8 @@ def results_section(results: dict, benchmark, args, years: int, label: str) -> l
         "",
         f"{first.value.index[0].date()} to {first.value.index[-1].date()} "
         f"({first.metrics['years']:.1f} years), ${args.total:,.0f} split across the top N "
-        f"on the first day.",
+        f"on the first day. Every annual row is the average of the 12 configurations, "
+        f"one for each month the yearly check can fall in.",
         "",
         *[f"- {bullet}" for bullet in _verdict(summary, benchmark, label)],
         "",
@@ -298,6 +363,7 @@ def results_section(results: dict, benchmark, args, years: int, label: str) -> l
         "",
         md_table(fmt(ranked).rename(columns=SUMMARY_NAMES), "Strategy"),
         "",
+        *anchor_section(per_anchor),
     ]
 
 
@@ -312,6 +378,9 @@ def insight_section(results: dict, args, years: int, label: str) -> list[str]:
 
     parts = [
         f"## Inside the {years}-year window",
+        "",
+        "Annual columns are the average of the 12 check-month configurations; the trade "
+        "logs below show one of them.",
         "",
         "### Return by year",
         "",
@@ -336,14 +405,15 @@ def insight_section(results: dict, args, years: int, label: str) -> list[str]:
         "",
     ]
 
-    for result in results.values():
+    for (_, check), result in results.items():
+        trades = result.trades[result.trades.kind == "swap"]
+        label = (f"{result.name}, January check" if check == "annual" else result.name)
         parts += [
-            f"<details><summary><b>{result.name}</b> — "
-            f"{result.metrics['changes']} changes, ending in "
+            f"<details><summary><b>{label}</b> — "
+            f"{len(trades)} changes, ending in "
             f"{', '.join(result.holdings)}</summary>",
             "",
         ]
-        trades = result.trades[result.trades.kind == "swap"]
         if trades.empty:
             parts.append("The list never changed.")
         else:
@@ -358,7 +428,7 @@ def insight_section(results: dict, args, years: int, label: str) -> list[str]:
 def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) -> str:
     """One markdown page comparing every strategy over each requested window."""
     label = "S&P 500" if args.benchmark in {"SPY", "VOO", "IVV"} else args.benchmark
-    spans = " and ".join(f"{y} years" for y, _, _ in windows)
+    spans = " and ".join(f"{y} years" for y, *_ in windows)
 
     parts = [
         f"# Holding the top companies by market cap: {spans} compared",
@@ -371,12 +441,17 @@ def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) ->
         "## How each strategy works",
         "",
         f"On day one, ${args.total:,.0f} is split equally across the N largest companies "
-        "by market cap. On the first trading day of every month (or every January, for "
-        "the annual variants) the list is ranked again using the previous day's market "
+        "by market cap. On the first trading day of every month, or of every year for "
+        "the annual variants, the list is ranked again using the previous day's market "
         "caps. If the top N is unchanged, nothing happens. If it changed, only the names "
         "that dropped out are sold, and their proceeds are split across the names that "
         "replaced them. A company that stays on the list is never trimmed, so it keeps "
         "compounding and never realizes a gain.",
+        "",
+        "An annual check can fall in any month, and which one it is turns out to matter, "
+        "so every annual strategy is run 12 times, once per check month, and every number "
+        "reported for it is the average of those 12 runs. Monthly strategies have no such "
+        "choice to make and are run once.",
         "",
         "## Assumptions",
         "",
@@ -385,6 +460,8 @@ def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) ->
         f"| Stake | ${args.total:,.0f} on day one, split equally across the N positions, "
         f"no further contributions |",
         f"| Universe | {len(data.universe)} of the largest US companies |",
+        "| Annual variants | averaged over 12 runs, one per month the yearly check "
+        "falls in |",
         f"| Tax | {'; '.join(describe_tax(args, tax)[:2])} |",
         f"| Benchmark | {label} bought once and held, same ${args.total:,.0f} |",
         f"| Data | {data.describe()} |",
@@ -398,8 +475,8 @@ def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) ->
     ]
 
     parts += ["## Results", ""]
-    for years, results, benchmark in windows:
-        parts += results_section(results, benchmark, args, years, label)
+    for years, results, benchmark, per_anchor in windows:
+        parts += results_section(results, benchmark, args, years, label, per_anchor)
     parts += insight_section(windows[0][1], args, windows[0][0], label)
 
     parts += [
@@ -419,6 +496,8 @@ def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) ->
         "- Rankings use the previous day's caps, so there is no look-ahead, but trades "
         "fill at the close with no slippage and "
         + (f"a {args.fees:.2%} fee." if args.fees else "no commission."),
+        "- Annual results average 12 check months, so no single one of them is what any "
+        "one investor would have experienced; the spread table shows how wide that is.",
         "- Two overlapping windows of one universe, in one ordering of history. A "
         "different decade would rank these differently.",
         "",
@@ -429,7 +508,7 @@ def comparison_document(windows: list[tuple], data: snap.Snapshot, args, tax) ->
         "Regenerate with:",
         "",
         "```bash",
-        f"python simulate.py report --years {','.join(str(y) for y, _, _ in windows)} "
+        f"python simulate.py report --years {','.join(str(y) for y, *_ in windows)} "
         f"--total {args.total:,.0f}".replace(",000", "000"),
         "```",
         "",
@@ -508,16 +587,24 @@ def cmd_report(args) -> None:
 
     windows = []
     for years in args.years:
-        results = {}
+        results, per_anchor = {}, {}
         for n, check in REPORT_STRATEGIES:
-            cell = argparse.Namespace(**{**vars(args), "top": [n], "check": [check],
-                                         "years": [years]})
-            _, cells, _ = run_grid(data, cell)
-            results[(n, check)] = cells[(years, n, check)]
+            anchors = MONTHS if check == "annual" else ("JAN",)
+            runs = {}
+            for anchor in anchors:
+                cell = argparse.Namespace(**{**vars(args), "top": [n], "check": [check],
+                                             "years": [years], "anchor": anchor})
+                _, cells, _ = run_grid(data, cell)
+                runs[anchor] = cells[(years, n, check)]
+            name = strategy_name(n, check, "JAN")
+            results[(n, check)] = (average_anchors(runs, name) if check == "annual"
+                                   else runs["JAN"])
+            if check == "annual":
+                per_anchor[name] = runs
         span = next(iter(results.values())).value.index
         benchmark = buy_and_hold(data.window(span[0], span[-1]).prices[args.benchmark],
                                  args.total, args.benchmark, tax, args.liquidate)
-        windows.append((years, results, benchmark))
+        windows.append((years, results, benchmark, per_anchor))
 
     path = out / "README.md"
     path.write_text(comparison_document(windows, data, args, tax))
