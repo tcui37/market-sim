@@ -18,7 +18,7 @@ import yfinance as yf
 
 from market.data import cache
 
-# US mega caps that plausibly held a top-5 market-cap spot since ~2006.
+# US large caps that plausibly held a top-50 market-cap spot since ~2006.
 # Citigroup and Bank of America (top-5-ish in 2006-07) are deliberately
 # excluded: their crisis-era dilution predates SEC XBRL share data, so their
 # early market caps cannot be computed reliably.
@@ -26,6 +26,9 @@ DEFAULT_UNIVERSE = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
     "XOM", "JNJ", "WMT", "JPM", "V", "UNH", "AVGO", "LLY",
     "GE", "PG", "T", "CVX", "IBM", "KO", "INTC", "CSCO", "ORCL", "PFE",
+    "MA", "HD", "COST", "ABBV", "MRK", "ADBE", "NFLX", "CRM", "AMD", "PEP",
+    "TMO", "MCD", "ACN", "LIN", "ABT", "DIS", "VZ", "NKE", "PM", "TXN",
+    "QCOM", "HON", "AMGN", "WFC",
 ]
 
 SEC_USER_AGENT = "market-sim/0.1 (open-source backtesting tool)"

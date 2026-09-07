@@ -20,11 +20,20 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from market.tax import TaxProfile
+
 
 @dataclass(frozen=True)
 class TaxConfig:
     st_rate: float = 0.24  # short-term gains: ordinary income (assumed bracket)
     lt_rate: float = 0.15  # long-term gains (held > 1 year)
+    profile: TaxProfile | None = None  # bracket-based bill; overrides the flat rates
+
+    def due(self, st_gain: float, lt_gain: float) -> float:
+        """Tax owed on one year of net realized gains."""
+        if self.profile is not None:
+            return self.profile.tax_on(st_gain, lt_gain)
+        return st_gain * self.st_rate + lt_gain * self.lt_rate
 
 
 @dataclass
@@ -57,6 +66,8 @@ class _Ledger:
         self.lt_gains = 0.0
         self.carryforward = 0.0  # accumulated net losses (stored positive)
         self.taxes_paid = 0.0
+        self.st_realized = 0.0   # taxable gains settled so far, after loss offsets
+        self.lt_realized = 0.0
 
     def buy(self, asset: str, day: pd.Timestamp, shares: float, cost: float) -> None:
         if shares > 0:
@@ -100,7 +111,9 @@ class _Ledger:
         used = min(self.carryforward, st); st -= used; self.carryforward -= used
         used = min(self.carryforward, lt); lt -= used; self.carryforward -= used
 
-        due = st * tax.st_rate + lt * tax.lt_rate
+        due = tax.due(st, lt)
+        self.st_realized += st
+        self.lt_realized += lt
         self.taxes_paid += due
         return due
 
