@@ -1,0 +1,9 @@
+vectorbt>=1.1,<2
+yfinance>=1.6
+streamlit>=1.61
+plotly>=5.18,<6
+pyarrow>=24
+requests>=2.31
+pandas
+numpy
+pytest>=9
